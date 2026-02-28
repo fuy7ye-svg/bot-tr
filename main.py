@@ -1,11 +1,11 @@
 import discord
 from discord import app_commands
-from discord.ext import tasks, commands
+from discord.ext import commands
 import os
 from flask import Flask
 from threading import Thread
 
-# --- سيرفر وهمي لإبقاء البوت حياً على Render ---
+# --- سيرفر ويب لإبقاء البوت حياً ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online!"
@@ -13,105 +13,102 @@ def home(): return "Bot is Online!"
 def run_web():
     app.run(host='0.0.0.0', port=8080)
 
-# --- بيانات المابات والأغراض (مدمجة للتصفية السريعة) ---
-# هنا جمعت لك الماب مع الغرض في خيار واحد عشان يسهل البحث
+# --- قائمة التصفية الموحدة (القيم يجب أن تكون كلمات مفتاحية للبحث) ---
 QUICK_FILTER_OPTIONS = [
-    # Blox Fruits
-    discord.SelectOption(label="Blox Fruits: Kitsune", value="bf_kitsune", emoji="🦊"),
-    discord.SelectOption(label="Blox Fruits: Leopard", value="bf_leopard", emoji="🐆"),
-    discord.SelectOption(label="Blox Fruits: Dragon", value="bf_dragon", emoji="🐉"),
-    # Blox Spin
-    discord.SelectOption(label="Blox Spin: Mega Spin", value="bs_mega", emoji="🎡"),
-    discord.SelectOption(label="Blox Spin: Rare Box", value="bs_box", emoji="📦"),
-    # Pet Sim 99
-    discord.SelectOption(label="Pet Sim 99: Huge Pet", value="ps_huge", emoji="🐱"),
-    discord.SelectOption(label="Pet Sim 99: Titanic", value="ps_titanic", emoji="🚢"),
-    # MM2
-    discord.SelectOption(label="MM2: Harvester", value="mm2_harvester", emoji="🏹"),
-    discord.SelectOption(label="MM2: IcePiercer", value="mm2_ice", emoji="❄️"),
+    discord.SelectOption(label="Blox Fruits: Kitsune", value="Kitsune", emoji="🦊"),
+    discord.SelectOption(label="Blox Fruits: Leopard", value="Leopard", emoji="🐆"),
+    discord.SelectOption(label="Blox Spin: Mega Spin", value="Mega Spin", emoji="🎡"),
+    discord.SelectOption(label="Blox Spin: Rare Box", value="Rare Box", emoji="📦"),
+    discord.SelectOption(label="Pet Sim 99: Huge Pet", value="Huge", emoji="🐱"),
+    discord.SelectOption(label="MM2: Harvester", value="Harvester", emoji="🏹"),
 ]
 
-# --- 1. نموذج التعبئة (Trade Modal) ---
+# --- نموذج التعبئة ---
 class TradeForm(discord.ui.Modal, title='إنشاء عرض مقايضة جديد'):
-    map_name = discord.ui.TextInput(label='اسم الماب', placeholder='Blox Fruits, Blox Spin...')
+    map_name = discord.ui.TextInput(label='اسم الماب', placeholder='مثال: Blox Fruits')
     item = discord.ui.TextInput(label='الغرض اللي عندك', placeholder='مثال: Kitsune')
-    looking_for = discord.ui.TextInput(label='وش تبي مقابلها', placeholder='مثال: Leopard + Add')
+    looking_for = discord.ui.TextInput(label='وش تبي مقابلها', placeholder='مثال: Leopard')
 
     async def on_submit(self, interaction: discord.Interaction):
-        channel_id = bot.market_channel_id
-        if not channel_id:
-            return await interaction.response.send_message("❌ لم يتم تحديد روم العروض!", ephemeral=True)
+        if not bot.offers_channel_id:
+            return await interaction.response.send_message("❌ لم يتم تحديد قناة العروض!", ephemeral=True)
         
-        channel = interaction.guild.get_channel(channel_id)
+        offers_channel = interaction.guild.get_channel(bot.offers_channel_id)
         embed = discord.Embed(title="📦 عرض مقايضة جديد", color=discord.Color.gold())
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url)
         embed.add_field(name="🗺️ الماب", value=self.map_name.value, inline=True)
         embed.add_field(name="📤 يعرض", value=self.item.value, inline=True)
         embed.add_field(name="📥 يطلب", value=self.looking_for.value, inline=True)
         
-        await channel.send(embed=embed)
+        await offers_channel.send(embed=embed)
         await interaction.response.send_message("✅ تم نشر عرضك!", ephemeral=True)
 
-# --- 2. نظام التصفية الموحد (Single List) ---
-class UnifiedFilter(discord.ui.Select):
-    def __init__(self):
-        super().__init__(placeholder="🔍 اختر الماب والغرض للبحث فوراً...", options=QUICK_FILTER_OPTIONS)
-
-    async def callback(self, interaction: discord.Interaction):
-        # هنا البوت ياخذ القيمة ويبحث عنها
-        selected = self.values[0]
-        item_name = [opt.label for opt in QUICK_FILTER_OPTIONS if opt.value == selected][0]
-        await interaction.response.send_message(f"🔎 جاري تصفية العروض لـ: **{item_name}**...", ephemeral=True)
-
+# --- واجهة التصفية مع منطق البحث ---
 class MainFilterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(UnifiedFilter())
+        
+    @discord.ui.select(placeholder="🔍 اختر للبحث عن عروض...", options=QUICK_FILTER_OPTIONS)
+    async def quick_filter(self, interaction: discord.Interaction, select: discord.ui.Select):
+        search_query = select.values[0].lower() # الكلمة التي سنبحث عنها
+        
+        if not bot.offers_channel_id:
+            return await interaction.response.send_message("❌ قناة العروض غير محددة بعد.", ephemeral=True)
+            
+        channel = interaction.guild.get_channel(bot.offers_channel_id)
+        found_offers = []
+
+        # إخبار المستخدم أن البحث جارٍ (لأن البحث في الرسائل قد يأخذ ثانية)
+        await interaction.response.defer(ephemeral=True)
+
+        # البحث في آخر 100 رسالة في قناة العروض
+        async for message in channel.history(limit=100):
+            if message.embeds:
+                content = ""
+                for embed in message.embeds:
+                    # تجميع نصوص الإمبد للبحث داخلها
+                    content += f" {embed.title} {embed.description}"
+                    for field in embed.fields:
+                        content += f" {field.name} {field.value}"
+                
+                # التحقق إذا كانت الكلمة موجودة في الإمبد
+                if search_query in content.lower():
+                    found_offers.append(message.jump_url)
+
+        # النتيجة النهائية
+        if found_offers:
+            links = "\n".join([f"🔹 [اضغط هنا للانتقال للعرض]({url})" for url in found_offers[:5]]) # عرض أول 5 نتائج
+            await interaction.followup.send(f"✅ تم العثور على عروض لـ **{select.values[0]}**:\n{links}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ لا يوجد عروض حالياً لـ **{select.values[0]}**.", ephemeral=True)
 
     @discord.ui.button(label="➕ إضافة عرضك", style=discord.ButtonStyle.green)
     async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TradeForm())
 
-# --- 3. كلاس البوت الرئيسي ---
 class TradeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
-        self.market_channel_id = None
-        self.last_menu_message = None
+        self.offers_channel_id = None 
 
     async def setup_hook(self):
         await self.tree.sync()
 
-    @tasks.loop(minutes=1)
-    async def refresh_menu(self):
-        if not self.market_channel_id: return
-        channel = self.get_channel(self.market_channel_id)
-        if not channel: return
-
-        if self.last_menu_message:
-            try: await self.last_menu_message.delete()
-            except: pass
-
-        embed = discord.Embed(
-            title="🛒 سوق المقايضة الذكي",
-            description="اختر الغرض من القائمة للبحث، أو اضغط الزر لإضافة عرضك الخاص.",
-            color=0x9b59b6
-        )
-        self.last_menu_message = await channel.send(embed=embed, view=MainFilterView())
-
-    async def on_ready(self):
-        print(f'✅ {self.user} جاهز بنظام القائمة الموحدة!')
-        if not self.refresh_menu.is_running():
-            self.refresh_menu.start()
-
 bot = TradeBot()
 
-@bot.tree.command(name="set_market", description="تحديد روم التصفية")
+@bot.tree.command(name="setup_trade", description="إرسال واجهة التصفية")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_market(interaction: discord.Interaction, channel: discord.TextChannel):
-    bot.market_channel_id = channel.id
-    await interaction.response.send_message(f"✅ تم تحديد الروم: {channel.mention}", ephemeral=True)
+async def setup_trade(interaction: discord.Interaction):
+    embed = discord.Embed(title="🛒 مركز المقايضة", description="اختر غرضاً للبحث عنه في قناة العروض.", color=0x3498db)
+    await interaction.channel.send(embed=embed, view=MainFilterView())
+    await interaction.response.send_message("✅ تم الإعداد.", ephemeral=True)
+
+@bot.tree.command(name="set_offers_channel", description="تحديد قناة العروض")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_offers(interaction: discord.Interaction, channel: discord.TextChannel):
+    bot.offers_channel_id = channel.id
+    await interaction.response.send_message(f"✅ تم تحديد قناة العروض: {channel.mention}", ephemeral=True)
 
 if __name__ == "__main__":
     Thread(target=run_web).start()

@@ -5,7 +5,7 @@ import os
 from flask import Flask
 from threading import Thread
 
-# --- سيرفر ويب لإبقاء البوت حياً على Render ---
+# --- سيرفر ويب بسيط لإبقاء البوت حياً على Render ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online!"
@@ -21,11 +21,11 @@ MAPS_DATA = {
     "MM2": ["Harvester", "IcePiercer", "Bat"]
 }
 
-# --- 1. واجهة التصفية والبحث الذكي ---
+# --- واجهة التصفية والبحث الذكي ---
 class DynamicFilterView(discord.ui.View):
     def __init__(self, selected_map=None):
         super().__init__(timeout=None)
-        # القائمة الأولى: اختيار الماب (تكون مفعلة دائماً)
+        # القائمة الأولى: اختيار الماب
         self.add_item(MapDropdown(selected_map))
         
         # القائمة الثانية: تظهر فقط إذا تم اختيار ماب وتعمل كقائمة بحث
@@ -66,7 +66,7 @@ class ItemDropdown(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         search_query = self.values[0].lower()
         
-        # تجنب فشل التفاعل (Interaction Failed) بإعطاء مهلة للبحث
+        # تجنب فشل التفاعل (Interaction Failed)
         await interaction.response.defer(ephemeral=True)
         
         if not bot.offers_channel_id:
@@ -75,7 +75,7 @@ class ItemDropdown(discord.ui.Select):
         channel = interaction.guild.get_channel(bot.offers_channel_id)
         found_offers = []
 
-        # البحث الفعلي في آخر 100 رسالة (Embeds)
+        # البحث في آخر 100 رسالة
         async for message in channel.history(limit=100):
             if message.embeds:
                 content = ""
@@ -89,15 +89,14 @@ class ItemDropdown(discord.ui.Select):
 
         if found_offers:
             links = "\n".join([f"🔹 [اضغط هنا للعرض]({url})" for url in found_offers[:5]])
-            await interaction.followup.send(f"✅ تم العثور على عروض لـ **{self.values[0]}**:\n{links}", ephemeral=True)
+            await interaction.followup.send(f"✅ عروض **{self.values[0]}** في **{self.map_name}**:\n{links}", ephemeral=True)
         else:
-            await interaction.followup.send(f"❌ لا يوجد عروض حالياً لـ **{self.values[0]}** في قناة العروض.", ephemeral=True)
+            await interaction.followup.send(f"❌ لا يوجد عروض حالياً لـ **{self.values[0]}**.", ephemeral=True)
 
-# --- 2. نموذج تقديم العروض (Modal) ---
-class TradeForm(discord.ui.Modal, title='إنشاء عرض مقايضة جديد'):
-    map_name = discord.ui.TextInput(label='اسم الماب', placeholder='Blox Fruits, MM2...')
-    item = discord.ui.TextInput(label='الغرض الذي تعرضه', placeholder='مثال: Kitsune')
-    looking_for = discord.ui.TextInput(label='المطلوب مقابلها', placeholder='مثال: Leopard + Add')
+class TradeForm(discord.ui.Modal, title='إنشاء عرض جديد'):
+    map_name = discord.ui.TextInput(label='اسم الماب', placeholder='مثال: Blox Fruits')
+    item = discord.ui.TextInput(label='الغرض اللي عندك', placeholder='مثال: Kitsune')
+    looking_for = discord.ui.TextInput(label='المطلوب', placeholder='مثال: Leopard')
 
     async def on_submit(self, interaction: discord.Interaction):
         if not bot.offers_channel_id:
@@ -111,9 +110,8 @@ class TradeForm(discord.ui.Modal, title='إنشاء عرض مقايضة جديد
         embed.add_field(name="📥 يطلب", value=self.looking_for.value, inline=True)
         
         await offers_channel.send(embed=embed)
-        await interaction.response.send_message("✅ تم نشر عرضك في قناة العروض!", ephemeral=True)
+        await interaction.response.send_message("✅ تم نشر عرضك بنجاح!", ephemeral=True)
 
-# --- 3. إعدادات البوت والتشغيل ---
 class TradeBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
@@ -125,29 +123,23 @@ class TradeBot(commands.Bot):
 
 bot = TradeBot()
 
-@bot.tree.command(name="setup_trade", description="إرسال واجهة المقايضة والتصفية")
+@bot.tree.command(name="setup_trade")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_trade(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🛒 مركز المقايضة الذكي",
-        description="اختر الماب أولاً لتظهر لك قائمة البحث عن الأغراض.",
-        color=0x3498db
-    )
+    embed = discord.Embed(title="🛒 مركز المقايضة", description="اختر الماب لفتح التصفية.", color=0x3498db)
     await interaction.channel.send(embed=embed, view=DynamicFilterView())
-    await interaction.response.send_message("✅ تم إعداد الواجهة في هذه القناة.", ephemeral=True)
+    await interaction.response.send_message("✅ تم الإعداد.", ephemeral=True)
 
-@bot.tree.command(name="set_offers_channel", description="تحديد القناة التي تظهر فيها عروض الناس")
+@bot.tree.command(name="set_offers_channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_offers(interaction: discord.Interaction, channel: discord.TextChannel):
     bot.offers_channel_id = channel.id
     await interaction.response.send_message(f"✅ تم تحديد قناة العروض: {channel.mention}", ephemeral=True)
 
-# التشغيل النهائي الآمن لـ Render
 if __name__ == "__main__":
     Thread(target=run_web).start()
-    # سحب التوكن من البيئة (Environment) وليس من الكود مباشرة
     token = os.getenv('DISCORD_TOKEN')
     if token:
         bot.run(token)
     else:
-        print("❌ خطأ: التوكن غير موجود في Environment Variables!")
+        print("❌ Token Not Found!")

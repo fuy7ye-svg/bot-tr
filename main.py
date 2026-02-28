@@ -4,7 +4,9 @@ from discord.ext import commands
 import os
 from flask import Flask
 from threading import Thread
+import datetime
 
+# --- سيرفر ويب ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Online!"
@@ -12,13 +14,17 @@ def home(): return "Bot is Online!"
 def run_web():
     app.run(host='0.0.0.0', port=8080)
 
+# --- البيانات ---
 GAMES_DATA = {
     "روبلوكس": ["Blox Fruits", "Blox Spin", "Pet Sim 99", "MM2"],
     "فورتنايت": ["سكينات", "حسابات"],
     "ماين كرافت": ["سيرفرات", "أغراض نادرة"]
 }
 
-# --- نظام التصفية المطور (حل مشكلة عدم رؤية العروض) ---
+# تخزين أوقات الإضافة لمنع الإغراق (Cooldown)
+user_cooldowns = {}
+
+# --- نظام التصفية (حل مشكلة التعليق) ---
 class FilterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -30,7 +36,10 @@ class FilterView(discord.ui.View):
             super().__init__(placeholder="🎮 اختر اللعبة للبحث...", options=options)
 
         async def callback(self, interaction: discord.Interaction):
+            # استخدام defer لمنع التعليق وفشل التفاعل
+            await interaction.response.defer(ephemeral=True) 
             game = self.values[0]
+            
             view = discord.ui.View(timeout=None)
             mode_options = [discord.SelectOption(label=m, value=m) for m in GAMES_DATA[game]]
             mode_sel = discord.ui.Select(placeholder=f"🕹️ اختر الطور في {game}...", options=mode_options)
@@ -45,38 +54,43 @@ class FilterView(discord.ui.View):
                 channel = inter.guild.get_channel(bot.offers_channel_id)
                 found_links = []
                 
-                # --- تطوير نظام البحث ليكون "شاملاً" ---
-                async for message in channel.history(limit=250): # البحث في آخر 250 رسالة
+                async for message in channel.history(limit=250):
                     if message.embeds:
                         for embed in message.embeds:
-                            # جمع كل بيانات الإمبد (العنوان، الوصف، الحقول) للبحث فيها
                             all_content = f"{embed.title or ''} {embed.description or ''} "
                             for field in embed.fields:
                                 all_content += f"{field.name} {field.value} "
                             
-                            # التحقق من وجود الكلمة المختارة
                             if selected_mode.lower() in all_content.lower():
                                 found_links.append(message.jump_url)
                 
                 if found_links:
                     results = "\n".join([f"🔹 [اضغط هنا للانتقال للعرض]({url})" for url in found_links[:10]])
-                    await inter.followup.send(f"✅ تم العثور على عروض في **{selected_mode}**:\n{results}", ephemeral=True)
+                    await inter.followup.send(f"✅ عروض **{selected_mode}**:\n{results}", ephemeral=True)
                 else:
-                    await inter.followup.send(f"❌ لم أجد عروضاً لـ **{selected_mode}** في آخر 250 رسالة.", ephemeral=True)
+                    await inter.followup.send(f"❌ لم أجد عروضاً لـ **{selected_mode}** حالياً.", ephemeral=True)
 
             mode_sel.callback = mode_callback
             view.add_item(mode_sel)
-            # إعادة تصفير القائمة الرئيسية وإرسال قائمة الأطوار
-            await interaction.response.edit_message(view=FilterView())
-            await interaction.followup.send(f"🔎 اختر الطور في **{game}** لجلب الروابط:", view=view, ephemeral=True)
+            # تحديث الرسالة الأصلية لتصفير القائمة
+            await interaction.followup.send(f"🔎 اختر الطور في **{game}**:", view=view, ephemeral=True)
 
-# --- نظام الإضافة (مع تأكيد الأقسام) ---
+# --- نظام إضافة العروض (مع مؤقت نص ساعة) ---
 class FormView(discord.ui.View):
     def __init__(self): super().__init__(timeout=None)
     @discord.ui.button(label="➕ إضافة عرضك الجديد", style=discord.ButtonStyle.green)
     async def start_trade(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = CreateTradeSelection()
-        await interaction.response.send_message("🎮 اختر اللعبة:", view=view, ephemeral=True)
+        # التحقق من المؤقت (نص ساعة = 1800 ثانية)
+        user_id = interaction.user.id
+        now = datetime.datetime.now()
+        
+        if user_id in user_cooldowns:
+            diff = (now - user_cooldowns[user_id]).total_seconds()
+            if diff < 1800:
+                remaining = int((1800 - diff) / 60)
+                return await interaction.response.send_message(f"⏳ يجب عليك الانتظار **{remaining} دقيقة** قبل إضافة عرض آخر!", ephemeral=True)
+
+        await interaction.response.send_message("🎮 اختر اللعبة:", view=CreateTradeSelection(), ephemeral=True)
 
 class CreateTradeSelection(discord.ui.View):
     def __init__(self):
@@ -93,7 +107,8 @@ class CreateTradeSelection(discord.ui.View):
             mode_sel = discord.ui.Select(placeholder="اختر الطور...", options=mode_opts)
             async def m_callback(inter):
                 await inter.response.send_modal(TradeForm(game=game, mode=mode_sel.values[0]))
-                await inter.delete_original_response()
+                try: await inter.delete_original_response()
+                except: pass
             mode_sel.callback = m_callback
             view.add_item(mode_sel)
             await interaction.response.edit_message(content=f"✅ حدد الطور في **{game}**:", view=view)
@@ -110,13 +125,16 @@ class TradeForm(discord.ui.Modal):
         channel = interaction.guild.get_channel(bot.offers_channel_id)
         embed = discord.Embed(title="📦 عرض مقايضة جديد", color=0x2b2d31)
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url)
-        # كتابة اسم الطور بوضوح في الوصف لضمان نجاح البحث
         embed.description = f"**القسم:** {self.game}\n**الطور:** {self.mode}\n━━━━━━━━━━━━━━━"
         embed.add_field(name="📤 يعرض:", value=f"```\n{self.item.value}\n```", inline=False)
         embed.add_field(name="📥 يطلب:", value=f"```\n{self.req.value}\n```", inline=False)
         
         await channel.send(content=f"🔔 عرض جديد: **{self.mode}**", embed=embed)
-        await interaction.response.send_message("✅ نُشر عرضك!", ephemeral=True)
+        
+        # تحديث وقت الإضافة للمستخدم (تفعيل المؤقت)
+        user_cooldowns[interaction.user.id] = datetime.datetime.now()
+        
+        await interaction.response.send_message("✅ نُشر عرضك بنجاح! لا يمكنك الإضافة مجدداً إلا بعد 30 دقيقة.", ephemeral=True)
 
 class TradeBot(commands.Bot):
     def __init__(self):
@@ -129,12 +147,12 @@ bot = TradeBot()
 @bot.tree.command(name="setup_form")
 async def setup_form(interaction: discord.Interaction):
     await interaction.channel.send(embed=discord.Embed(title="🛒 سوق المقايضات", description="اضغط لإضافة عرضك."), view=FormView())
-    await interaction.response.send_message("✅ تم.", ephemeral=True)
+    await interaction.response.send_message("✅ تم وضع واجهة الإضافة.", ephemeral=True)
 
 @bot.tree.command(name="setup_filter")
 async def setup_filter(interaction: discord.Interaction):
     await interaction.channel.send(embed=discord.Embed(title="🔍 تصفية سريعة", description="اختر اللعبة والطور لتظهر النتائج."), view=FilterView())
-    await interaction.response.send_message("✅ تم.", ephemeral=True)
+    await interaction.response.send_message("✅ تم وضع واجهة التصفية.", ephemeral=True)
 
 @bot.tree.command(name="set_offers_channel")
 async def set_offers(interaction: discord.Interaction, channel: discord.TextChannel):
